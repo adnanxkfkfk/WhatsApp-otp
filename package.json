@@ -1,7 +1,6 @@
 {
   "name": "whatsapp-otp-api",
   "version": "1.0.0",
-  "description": "WhatsApp OTP API using Baileys",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
