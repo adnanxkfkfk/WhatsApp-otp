@@ -3,7 +3,7 @@ const QRCode = require("qrcode");
 const {
   makeWASocket,
   useMultiFileAuthState,
-  DisconnectReason
+  DisconnectReason,
 } = require("@whiskeysockets/baileys");
 const path = require("path");
 const rimraf = require("rimraf");
@@ -14,14 +14,11 @@ app.use(express.json({ limit: "10kb" }));
 const OTP_VALIDITY = 5 * 60 * 1000;
 const BLOCK_DURATION = 15 * 60 * 1000;
 
-let sock,
-  currentQR = "",
-  isConnected = false;
+let sock, currentQR = "", isConnected = false;
 const otpStore = new Map();
 const requestLog = new Map();
 const blocked = new Set();
 
-// Helper Functions
 function block(key) {
   blocked.add(key);
   setTimeout(() => blocked.delete(key), BLOCK_DURATION);
@@ -30,7 +27,7 @@ function block(key) {
 function logRequest(ip) {
   const now = Date.now();
   const entries = requestLog.get(ip) || [];
-  const recent = entries.filter((t) => now - t < 60000);
+  const recent = entries.filter(t => now - t < 60000);
   recent.push(now);
   requestLog.set(ip, recent);
   return recent.length;
@@ -51,7 +48,7 @@ async function startSocket() {
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) currentQR = await QRCode.toDataURL(qr);
     if (connection === "close") {
-      const code = lastDisconnect?.error?.output?.statusCode;
+      const code = (lastDisconnect?.error)?.output?.statusCode;
       isConnected = false;
       if (code === DisconnectReason.loggedOut) {
         rimraf.sync("./auth");
@@ -75,59 +72,62 @@ app.get("/qr", async (req, res) => {
   res.send(`<img src="${currentQR}" width="300" height="300" /><p>Scan to connect</p>`);
 });
 
-// Send OTP with URL button
-app.post("/message", async (req, res) => {
-  const { phone, message } = req.body;
-
-  if (!phone || !message) {
-    return res.status(400).json({ error: "Missing phone or message" });
+app.post("/otp", async (req, res) => {
+  const ip = req.ip;
+  if (blocked.has(ip)) return res.status(429).json({ error: "Blocked" });
+  if (logRequest(ip) > 5) {
+    block(ip);
+    return res.status(429).json({ error: "Too many requests" });
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  storeOTP(phone, otp);
+  const input = req.body;
+  if (!input?.phone) return res.status(400).json({ error: "Invalid input" });
 
-  const buttonMessage = {
-    text: `${message}\n\nYour OTP is: *${otp}*\nIt is valid for 5 minutes.\nClick below to verify.`,
-    footer: "Do not share this OTP with anyone.",
-    templateButtons: [
-      {
-        index: 0,
-        urlButton: {
-          displayText: "Verify OTP",
-          url: `https://ftstransportservice.com/verify?OTP=${otp}`
-        }
-      },
-      {
-        index: 1,
-        quickReplyButton: {
-          displayText: "Resend OTP",
-          id: "resend_otp"
-        }
-      }
-    ]
-  };
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  storeOTP(input.phone, otp);
+
+  const verificationUrl = `https://fts.com/otp?=${otp}`;
+  const msg = `*Booking Confirmation OTP*\n\nHello,\nTo confirm your booking with Farhan Transport Service, please use the OTP below:\n\n*OTP:* ${otp}\n\nValid for 5 minutes. Do not share this code.`;
 
   try {
-    await sock.sendMessage(`${phone}@s.whatsapp.net`, buttonMessage);
+    // Send OTP with a button
+    await sock.sendMessage(`${input.phone}@s.whatsapp.net`, {
+      text: msg,
+      footer: "Farhan Transport Service",
+      buttons: [
+        {
+          buttonId: `verify_otp_${otp}`,
+          buttonText: { displayText: "Verify via Web" },
+          type: 1
+        }
+      ],
+      headerType: 1
+    });
+
+    // Optional: Send link separately
+    await sock.sendMessage(`${input.phone}@s.whatsapp.net`, {
+      text: `Or click the link to verify:\n${verificationUrl}`
+    });
+
     res.json({ sent: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to send message" });
+    console.error("Error sending message:", err);
+    res.status(500).json({ error: "Failed to send OTP" });
   }
 });
 
-// Verify OTP
 app.post("/verify", (req, res) => {
-  const { phone, otp } = req.body;
-  if (!phone || !otp) return res.status(400).json({ error: "Invalid input" });
+  const input = req.body;
+  if (!input?.phone || !input?.otp)
+    return res.status(400).json({ error: "Invalid input" });
 
-  const stored = otpStore.get(phone);
-  if (stored && stored.otp === otp && Date.now() < stored.expires) {
-    otpStore.delete(phone);
+  const stored = otpStore.get(input.phone);
+  if (stored && stored.otp === input.otp && Date.now() < stored.expires) {
+    otpStore.delete(input.phone);
     return res.json({ verified: true });
   }
 
-  block(phone);
+  block(input.phone);
   res.json({ verified: false, error: "Invalid or expired OTP" });
 });
 
