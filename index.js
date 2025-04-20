@@ -7,6 +7,7 @@ const path = require("path");
 const rimraf = require("rimraf");
 
 const app = express();
+app.use(express.json({ limit: '10kb' }));
 
 const OTP_VALIDITY = 5 * 60 * 1000;
 const BLOCK_DURATION = 15 * 60 * 1000;
@@ -63,62 +64,62 @@ async function startSocket() {
 startSocket();
 
 // Routes
-
-// Show QR
 app.get("/qr", async (req, res) => {
   if (isConnected) return res.send("<h3>Already connected to WhatsApp</h3>");
   if (!currentQR) return res.send("<h3>QR not ready. Try again.</h3>");
   res.send(`<img src="${currentQR}" width="300" height="300" /><p>Scan to connect</p>`);
 });
 
-// Send OTP
 app.get("/otp", async (req, res) => {
   const ip = req.ip;
-  const phone = req.query.phone;
-  if (!phone) return res.send("Phone number is required.");
-
-  if (blocked.has(ip)) return res.send("You are blocked. Try again later.");
+  if (blocked.has(ip)) return res.status(429).json({ error: "Blocked" });
   if (logRequest(ip) > 5) {
     block(ip);
-    return res.send("Too many requests. Try again in a few minutes.");
+    return res.status(429).json({ error: "Too many requests" });
   }
+
+  const phone = req.query.phone;
+  if (!phone) return res.status(400).json({ error: "Invalid input" });
 
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   storeOTP(phone, otp);
 
-  const msg = `*Booking Confirmation OTP*\n\nHello,\nTo confirm your booking with *Farhan Transport Service*, please use the OTP: *${otp}*\n\nValid for 5 minutes only. Never share this code.\n\n[Verify OTP](https://fts.com/verify?phone=${phone}&otp=${otp})`;
+  const msg = `Booking Confirmation OTP\nHello,\nTo confirm your booking with Farhan Transport Service, please use the OTP: ${otp}.\nValid for 5 minutes only. Never share this code.`;
 
   try {
-    await sock.sendMessage(`${phone}@s.whatsapp.net`, {
-      text: msg,
-      buttons: [
-        {
-          buttonId: "verify",
-          buttonText: { displayText: "Verify via Web" },
-          type: 1
-        }
-      ],
-      footer: "Farhan Transport Service",
-      headerType: 1
-    });
-    res.send("OTP sent successfully.");
+    await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: msg });
+    res.json({ sent: true });
   } catch {
-    res.status(500).send("Failed to send OTP.");
+    res.status(500).json({ error: "Failed to send OTP" });
   }
 });
 
-// Verify OTP
 app.get("/verify", (req, res) => {
-  const { phone, otp } = req.query;
-  if (!phone || !otp) return res.send("Phone and OTP are required.");
+  const phone = req.query.phone;
+  const otp = req.query.otp;
+
+  if (!phone || !otp) return res.status(400).json({ error: "Invalid input" });
 
   const stored = otpStore.get(phone);
   if (stored && stored.otp === otp && Date.now() < stored.expires) {
     otpStore.delete(phone);
-    return res.send("✅ OTP Verified successfully.");
+    return res.json({ verified: true });
   }
   block(phone);
-  res.send("❌ Invalid or expired OTP.");
+  res.json({ verified: false, error: "Invalid or expired OTP" });
+});
+
+// New GET route for sending a custom message
+app.get("/msg", async (req, res) => {
+  const { msg, phone } = req.query;
+  if (!msg || !phone) return res.status(400).json({ error: "Missing msg or phone parameter" });
+
+  try {
+    await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: msg });
+    res.json({ sent: true });
+  } catch {
+    res.status(500).json({ error: "Failed to send message" });
+  }
 });
 
 app.listen(3000, () => console.log("API running on http://localhost:3000"));
